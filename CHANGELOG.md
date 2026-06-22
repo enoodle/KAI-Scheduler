@@ -82,6 +82,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Removed redundant `PodDisruptionBudgetImplemented` guard from operator PDB creation helper [#1613](https://github.com/kai-scheduler/KAI-Scheduler/pull/1613) [dttung2905](https://github.com/dttung2905)
 - Updated Go toolchain and base build images to v1.26.3.
 - **Breaking:** The podgroup produced for JobSet is now produces as a single PodGroup per JobSet with a two-level SubGroup hierarchy (one parent SubGroup per `replicatedJob`, one leaf SubGroup per replica) regardless of `startupPolicyOrder`. The `kai.scheduler/batch-min-member` annotation on the JobSet now overrides the root `minSubGroup`; the same annotation on `replicatedJobs[].template.metadata.annotations` overrides the leaf `minMember` (defaulting to `template.spec.parallelism`). [#1617](https://github.com/kai-scheduler/KAI-Scheduler/pull/1617) [davidLif](https://github.com/davidLif)
+- Optimized the job solver to run the full allocation probe only once after partial search finds at least one solvable pending task.
 
 ### Removed
 - Removed the never-populated `status.phase`, `status.running`, `status.succeeded`, `status.failed`, and `status.pending` fields (and the `PodGroupPhase` type) from the `PodGroup` (`scheduling.run.ai/v2alpha2`) schema. No controller ever wrote them; use `status.resourcesStatus` and `status.schedulingConditions` to determine PodGroup liveness. [#1650](https://github.com/kai-scheduler/KAI-Scheduler/issues/1650) [david-gang](https://github.com/david-gang)
