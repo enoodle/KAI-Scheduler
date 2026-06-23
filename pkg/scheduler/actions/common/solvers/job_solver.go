@@ -216,7 +216,7 @@ func searchMaxSolvableK(n int, probe func(k int) *SearchResult) (int, *SearchRes
 	}
 
 	lo := 0
-	hi := n
+	var hi int
 	var lastUnsolvedResult *SearchResult
 	k := 1
 	for k < n {
@@ -232,8 +232,7 @@ func searchMaxSolvableK(n int, probe func(k int) *SearchResult) (int, *SearchRes
 		lo = k
 		k *= 2
 		if k >= n {
-			hi = n
-			break
+			return lo, lastUnsolvedResult
 		}
 	}
 
