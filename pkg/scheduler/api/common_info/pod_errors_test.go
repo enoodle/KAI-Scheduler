@@ -41,6 +41,62 @@ func TestFitErrors_Error(t *testing.T) {
 	}
 }
 
+func TestFitErrors_ErrorCountsLazyNodeErrorsWithoutRetainingDetails(t *testing.T) {
+	f := NewFitErrors()
+	f.SetLazyNodeError("node-a", []string{"node(s) didn't have enough resources: GPUs"}, nil)
+	f.SetLazyNodeError("node-b", []string{"node(s) didn't have enough resources: GPUs"}, nil)
+
+	want := "no nodes with enough resources were found: 2 node(s) didn't have enough resources: GPUs."
+	if got := f.Error(); got != want {
+		t.Fatalf("Error() = %q, want %q", got, want)
+	}
+	if got := f.TotalNodeErrors(); got != 2 {
+		t.Fatalf("TotalNodeErrors() = %d, want 2", got)
+	}
+	if got := f.StoredDetailedNodeErrors(); got != 0 {
+		t.Fatalf("StoredDetailedNodeErrors() = %d, want 0", got)
+	}
+}
+
+func TestFitErrors_DetailedErrorResolvesLazyNodeErrors(t *testing.T) {
+	f := NewFitErrors()
+	f.SetLazyNodeError("node-b", []string{"node(s) didn't have enough resources: GPUs"}, func(nodeName string) *TasksFitError {
+		return NewFitErrorWithDetailedMessage(
+			"task",
+			"namespace",
+			nodeName,
+			[]string{"node(s) didn't have enough resources: GPUs"},
+			"Node didn't have enough resources: GPUs, requested: 1, used: 8, capacity: 8",
+		)
+	})
+	f.SetLazyNodeError("node-a", []string{"node(s) didn't have enough resources: GPUs"}, func(nodeName string) *TasksFitError {
+		return NewFitErrorWithDetailedMessage(
+			"task",
+			"namespace",
+			nodeName,
+			[]string{"node(s) didn't have enough resources: GPUs"},
+			"Node didn't have enough resources: GPUs, requested: 1, used: 8, capacity: 8",
+		)
+	})
+
+	want := "\nno nodes with enough resources were found.\n<node-a>: Node didn't have enough resources: GPUs, requested: 1, used: 8, capacity: 8.\n<node-b>: Node didn't have enough resources: GPUs, requested: 1, used: 8, capacity: 8."
+	if got := f.DetailedError(); got != want {
+		t.Fatalf("DetailedError() = %q, want %q", got, want)
+	}
+}
+
+func TestFitErrors_DetailedErrorReportsUnresolvedLazyNode(t *testing.T) {
+	f := NewFitErrors()
+	f.SetLazyNodeError("deleted-node", []string{"node(s) didn't have enough resources: GPUs"}, func(string) *TasksFitError {
+		return nil
+	})
+
+	want := "\nno nodes with enough resources were found.\n<deleted-node>: fit error details are no longer available."
+	if got := f.DetailedError(); got != want {
+		t.Fatalf("DetailedError() = %q, want %q", got, want)
+	}
+}
+
 func TestNewFitErrorInsufficientResource(t *testing.T) {
 	vectorMap := resource_info.NewResourceVectorMap()
 	type args struct {

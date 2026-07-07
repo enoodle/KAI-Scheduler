@@ -236,7 +236,7 @@ func (ssn *Session) FittingNode(task *pod_info.PodInfo, node *node_info.NodeInfo
 	allocatable, fitError := ssn.isTaskAllocatableOnNode(task, job, node, writeFittingDelta)
 	if !allocatable {
 		if fitError != nil && writeFittingDelta {
-			fitErrors.SetNodeError(node.Name, fitError)
+			fitError.record(fitErrors)
 			job.AddTaskFitErrors(task, fitErrors)
 		}
 		return false
@@ -254,6 +254,21 @@ func (ssn *Session) FittingNode(task *pod_info.PodInfo, node *node_info.NodeInfo
 		return false
 	}
 	return true
+}
+
+type nodeFitFailure struct {
+	nodeName string
+	reasons  []string
+	resolver common_info.NodeFitErrorResolver
+	err      error
+}
+
+func (failure *nodeFitFailure) record(fitErrors *common_info.TasksFitErrors) {
+	if failure.err != nil {
+		fitErrors.SetNodeError(failure.nodeName, failure.err)
+		return
+	}
+	fitErrors.SetLazyNodeError(failure.nodeName, failure.reasons, failure.resolver)
 }
 
 // OrderedNodesByTask scores nodes for a task and returns them in order of their scores
@@ -322,9 +337,9 @@ func (ssn *Session) scoreNodes(nodes []*node_info.NodeInfo, task *pod_info.PodIn
 }
 
 func (ssn *Session) isTaskAllocatableOnNode(task *pod_info.PodInfo, job *podgroup_info.PodGroupInfo,
-	node *node_info.NodeInfo, writeFittingDelta bool) (bool, *common_info.TasksFitError) {
+	node *node_info.NodeInfo, writeFittingDelta bool) (bool, *nodeFitFailure) {
 	allocatable := true
-	var fitError *common_info.TasksFitError = nil
+	var fitError *nodeFitFailure = nil
 
 	if !node.IsTaskAllocatableOnReleasingOrIdle(task) {
 		allocatable = false
@@ -333,7 +348,37 @@ func (ssn *Session) isTaskAllocatableOnNode(task *pod_info.PodInfo, job *podgrou
 			task.Namespace, task.Name, task.ResReqVector, node.Name, node.ReleasingVector, node.IdleVector)
 		if writeFittingDelta {
 			if taskAllocatable := node.IsTaskAllocatable(task); !taskAllocatable {
-				fitError = node.FittingError(task, len(job.GetAllPodsMap()) > 1)
+				reasons := node.FittingErrorReasons(task)
+				if len(reasons) == 0 {
+					eagerFitError := node.FittingError(task, len(job.GetAllPodsMap()) > 1)
+					if eagerFitError != nil {
+						fitError = &nodeFitFailure{
+							nodeName: node.Name,
+							err:      eagerFitError,
+						}
+					}
+				} else {
+					retainDetails := ssn.SchedulerParams.DetailedFitErrors
+					log.InfraLogger.V(6).Do(func() {
+						retainDetails = true
+					})
+
+					var resolver common_info.NodeFitErrorResolver
+					if retainDetails {
+						resolver = func(nodeName string) *common_info.TasksFitError {
+							currentNode := ssn.ClusterInfo.Nodes[nodeName]
+							if currentNode == nil {
+								return nil
+							}
+							return currentNode.FittingError(task, len(job.GetAllPodsMap()) > 1)
+						}
+					}
+					fitError = &nodeFitFailure{
+						nodeName: node.Name,
+						reasons:  reasons,
+						resolver: resolver,
+					}
+				}
 			}
 		}
 	}

@@ -31,6 +31,8 @@ type TasksFitError struct {
 	DetailedReasons []string
 }
 
+type NodeFitErrorResolver func(nodeName string) *TasksFitError
+
 func NewFitErrorWithDetailedMessage(name, namespace, nodeName string, reasons []string, detailedReasons ...string) *TasksFitError {
 	fe := &TasksFitError{
 		taskName:        name,
@@ -170,13 +172,18 @@ func (f *TasksFitError) Error() string {
 }
 
 type TasksFitErrors struct {
-	nodes map[string]*TasksFitError
-	err   string
+	nodes        map[string]*TasksFitError
+	lazyNodes    map[string]NodeFitErrorResolver
+	reasonCounts map[string]int
+	nodeErrors   int
+	err          string
 }
 
 func NewFitErrors() *TasksFitErrors {
 	f := new(TasksFitErrors)
 	f.nodes = make(map[string]*TasksFitError)
+	f.lazyNodes = make(map[string]NodeFitErrorResolver)
+	f.reasonCounts = make(map[string]int)
 	return f
 }
 
@@ -195,34 +202,71 @@ func (f *TasksFitErrors) SetNodeError(nodeName string, err error) {
 	}
 
 	f.nodes[nodeName] = fe
+	f.recordNodeReasons(fe.Reasons)
 }
 
 func (f *TasksFitErrors) AddNodeErrors(errors *TasksFitErrors) {
 	for nodeName, fitError := range errors.nodes {
 		f.nodes[nodeName] = fitError
 	}
+	for nodeName, resolver := range errors.lazyNodes {
+		f.lazyNodes[nodeName] = resolver
+	}
+	for reason, count := range errors.reasonCounts {
+		f.reasonCounts[reason] += count
+	}
+	f.nodeErrors += errors.nodeErrors
+}
+
+func (f *TasksFitErrors) SetLazyNodeError(
+	nodeName string, reasons []string, resolver NodeFitErrorResolver,
+) {
+	f.recordNodeReasons(reasons)
+	if resolver != nil {
+		f.lazyNodes[nodeName] = resolver
+	}
+}
+
+func (f *TasksFitErrors) TotalNodeErrors() int {
+	return f.nodeErrors
+}
+
+func (f *TasksFitErrors) StoredDetailedNodeErrors() int {
+	return len(f.nodes)
 }
 
 func (f *TasksFitErrors) DetailedError() string {
 	if f.err == "" {
 		f.err = ResourcesWereNotFoundMsg
 	}
-	reasonMessages := []string{"\n" + f.err + "."}
+	reasonMessages := []string{}
 	for _, node := range f.nodes {
 		reasonMessages = append(reasonMessages,
 			fmt.Sprintf("\n<%v>: %v.", node.NodeName, strings.Join(node.DetailedReasons, ", ")))
 	}
+	for nodeName, resolver := range f.lazyNodes {
+		node := resolver(nodeName)
+		if node == nil {
+			reasonMessages = append(reasonMessages,
+				fmt.Sprintf("\n<%v>: fit error details are no longer available.", nodeName))
+			continue
+		}
+		reasonMessages = append(reasonMessages,
+			fmt.Sprintf("\n<%v>: %v.", node.NodeName, strings.Join(node.DetailedReasons, ", ")))
+	}
 	sort.Strings(reasonMessages)
-	return strings.Join(reasonMessages, "")
+	return "\n" + f.err + "." + strings.Join(reasonMessages, "")
 }
 
 func (f *TasksFitErrors) Error() string {
-	reasons := make(map[string]int)
-
 	sortReasonsHistogram := func() []string {
-		for _, node := range f.nodes {
-			for _, reason := range node.Reasons {
-				reasons[reason]++
+		reasons := f.reasonCounts
+		if len(reasons) == 0 {
+			reasons = make(map[string]int)
+			for _, node := range f.nodes {
+				for _, reason := range node.Reasons {
+					reasons[reason]++
+				}
 			}
 		}
 
@@ -243,6 +287,13 @@ func (f *TasksFitErrors) Error() string {
 		reasonMsg += fmt.Sprintf(": %v.", strings.Join(nodeReasonsHistogram, ". \n"))
 	}
 	return reasonMsg
+}
+
+func (f *TasksFitErrors) recordNodeReasons(reasons []string) {
+	f.nodeErrors++
+	for _, reason := range reasons {
+		f.reasonCounts[reason]++
+	}
 }
 
 type NotFoundError struct {

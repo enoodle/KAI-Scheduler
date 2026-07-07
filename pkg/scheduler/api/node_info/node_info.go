@@ -300,6 +300,88 @@ func (ni *NodeInfo) FittingError(task *pod_info.PodInfo, isGangTask bool) *commo
 	return nil
 }
 
+func (ni *NodeInfo) FittingErrorReasons(task *pod_info.PodInfo) []string {
+	enoughResources := ni.lessEqualTaskToNodeResources(task, ni.IdleVector)
+	if !enoughResources {
+		messageSuffix := ""
+		if len(task.Pod.Spec.Overhead) > 0 {
+			overheadVector := resource_info.NewResourceVectorFromResourceList(task.Pod.Spec.Overhead, ni.VectorMap)
+			idleWithOverhead := ni.IdleVector.Clone()
+			idleWithOverhead.Add(overheadVector)
+			if ni.lessEqualTaskToNodeResources(task, idleWithOverhead) {
+				messageSuffix = fmt.Sprintf("%s. The overhead resources are %v", common_info.OverheadMessage,
+					k8s_utils.StringResourceList(task.Pod.Spec.Overhead))
+			}
+		}
+
+		shortMessages := ni.insufficientResourceReasons(task)
+		if len(messageSuffix) > 0 {
+			for i, msg := range shortMessages {
+				shortMessages[i] = fmt.Sprintf("%s. %s", msg, messageSuffix)
+			}
+		}
+		return shortMessages
+	}
+
+	allocatable, err := ni.isTaskStorageAllocatable(task)
+	if !allocatable {
+		return []string{err.Error()}
+	}
+
+	return nil
+}
+
+func (ni *NodeInfo) insufficientResourceReasons(task *pod_info.PodInfo) []string {
+	var shortMessages []string
+
+	if len(task.GpuRequirement.MigResources()) > 0 {
+		for migProfile, quant := range task.GpuRequirement.MigResources() {
+			migIdx := ni.VectorMap.GetIndex(migProfile)
+			if int64(ni.IdleVector.Get(migIdx)) < quant {
+				shortMessages = append(shortMessages, fmt.Sprintf("node(s) didn't have enough of mig profile: %s",
+					migProfile))
+			}
+		}
+	} else {
+		requestedGPUs := task.GpuRequirement.GPUs()
+		if requestedGPUs > ni.IdleVector.Get(resource_info.GPUIndex) {
+			shortMessages = append(shortMessages, "node(s) didn't have enough resources: GPUs")
+		}
+
+		if task.GpuRequirement.GpuMemory() > ni.MemoryOfEveryGpuOnNode {
+			shortMessages = append(shortMessages, "node(s) didn't have enough resources: GPU memory")
+		}
+	}
+
+	requestedCPUs := int64(task.ResReqVector.Get(resource_info.CPUIndex))
+	availableCPUs := int64(ni.IdleVector.Get(resource_info.CPUIndex))
+	if requestedCPUs > availableCPUs {
+		shortMessages = append(shortMessages, "node(s) didn't have enough resources: CPU cores")
+	}
+
+	if task.ResReqVector.Get(resource_info.MemoryIndex) > ni.IdleVector.Get(resource_info.MemoryIndex) {
+		shortMessages = append(shortMessages, "node(s) didn't have enough resources: memory")
+	}
+
+	for i := 0; i < ni.VectorMap.Len(); i++ {
+		rName := ni.VectorMap.ResourceAt(i)
+		if rName == v1.ResourceCPU || rName == v1.ResourceMemory || rName == commonconstants.GpuResource {
+			continue
+		}
+		if resource_info.IsMigResource(v1.ResourceName(rName)) {
+			continue
+		}
+		requestedQuant := int64(task.ResReqVector.Get(i))
+		availableQuant := int64(ni.IdleVector.Get(i))
+		if requestedQuant > 0 && availableQuant < requestedQuant {
+			shortMessages = append(shortMessages, fmt.Sprintf("node(s) didn't have enough resources: %s",
+				rName))
+		}
+	}
+
+	return shortMessages
+}
+
 func (ni *NodeInfo) PredicateByNodeResourcesType(task *pod_info.PodInfo) error {
 	// Prevents legacy MIG jobs from being scheduled
 	if task.IsLegacyMIGtask {

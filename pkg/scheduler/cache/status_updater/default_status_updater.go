@@ -362,7 +362,9 @@ func (su *defaultStatusUpdater) recordUnschedulablePodsEvents(job *podgroup_info
 			if su.detailedFitErrors {
 				msg = fitError.DetailedError()
 			} else {
-				log.InfraLogger.V(6).Infof("Full fit error: %s", fitError.DetailedError())
+				log.InfraLogger.V(6).Do(func() {
+					log.InfraLogger.V(6).Infof("Full fit error: %s", fitError.DetailedError())
+				})
 			}
 		} else if len(job.JobFitErrors) > 0 {
 			msg = fmt.Sprintf("%s", common_info.JobFitErrorsToMessage(job.JobFitErrors))
@@ -427,7 +429,9 @@ func (su *defaultStatusUpdater) recordUnschedulablePodGroup(job *podgroup_info.P
 	if su.detailedFitErrors {
 		msg = common_info.JobFitErrorsToDetailedMessage(job.JobFitErrors)
 	} else {
-		log.InfraLogger.V(6).Infof("Full job fit error: %s", common_info.JobFitErrorsToDetailedMessage(job.JobFitErrors))
+		log.InfraLogger.V(6).Do(func() {
+			log.InfraLogger.V(6).Infof("Full job fit error: %s", common_info.JobFitErrorsToDetailedMessage(job.JobFitErrors))
+		})
 	}
 
 	if len(msg) == 0 {
