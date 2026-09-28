@@ -320,8 +320,7 @@ var _ = Describe("Can Reclaim Resources", func() {
 				name: "Fractional GPU allocation exactly matches quota",
 				reclaimerInfo: &ReclaimerInfo{
 					Queue:             "queue1",
-					RequiredResources: resource_info.NewResource(1, 1, 0.2).ToVector(testVectorMap),
-					VectorMap:         testVectorMap,
+					RequiredResources: resource_info.NewResource(1, 1, 0.2),
 					IsPreemptable:     false,
 				},
 				queue: &rs.QueueAttributes{
