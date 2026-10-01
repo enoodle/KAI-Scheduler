@@ -532,7 +532,7 @@ func (ni *NodeInfo) addTaskResources(task *pod_info.PodInfo) {
 // victims fail in every reclaim/preempt scenario. Pods terminating independently in the
 // cluster stay indexed, matching kube-scheduler, which keeps a pod until its delete event.
 func excludedFromPodAffinity(task *pod_info.PodInfo) bool {
-	return task.Status == pod_status.Releasing && task.IsVirtualStatus
+	return task.Status == pod_status.Releasing
 }
 
 func (ni *NodeInfo) RemoveTask(ti *pod_info.PodInfo) error {
