@@ -19,9 +19,6 @@ import (
 	commonconstants "github.com/kai-scheduler/api/constants"
 )
 
-// Only a task evicted by this session (Releasing + virtual status) leaves the inter-pod
-// affinity index. A pod that is terminating independently in the cluster stays indexed,
-// and the bookkeeping stays symmetric across evict / unevict / stuck-in-releasing.
 func TestNodeInfoReleasingPodAffinity(t *testing.T) {
 	type step struct {
 		status  pod_status.PodStatus
@@ -67,8 +64,6 @@ func TestNodeInfoReleasingPodAffinity(t *testing.T) {
 			task.Status, task.IsVirtualStatus = tt.add.status, tt.add.virtual
 			assert.NoError(t, ni.AddTask(task))
 			if tt.update != nil {
-				// Mirrors Statement.Evict / unevict: the task changes first, then the node re-indexes
-				// it; the node keeps its own clone, so removal is decided by the indexed state.
 				task.Status, task.IsVirtualStatus = tt.update.status, tt.update.virtual
 				assert.NoError(t, ni.UpdateTask(task))
 			}
