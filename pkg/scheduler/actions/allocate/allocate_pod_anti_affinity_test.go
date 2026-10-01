@@ -21,10 +21,6 @@ import (
 
 const hostnameTopologyKey = "kubernetes.io/hostname"
 
-// A pod that is terminating independently in the cluster (Releasing, not evicted by this
-// session) stays in the inter-pod affinity index, exactly like upstream kube-scheduler:
-// allocate neither binds beside it nor pipelines onto its resources while a required
-// anti-affinity involves it. Only session-selected victims leave the index (see reclaim).
 func TestAllocateWithRequiredAntiAffinityAgainstReleasingPods(t *testing.T) {
 	test_utils.InitTestingInfrastructure()
 	for _, gpus := range []float64{1, 0.5} {
@@ -87,8 +83,7 @@ func getAllocatePodAntiAffinityTestsMetadata() []integration_tests_utils.TestTop
 			PodAntiAffinityTopologyKey: hostnameTopologyKey,
 		}
 	}
-	// Labelled tier=preprocess and carrying its own required anti-affinity against
-	// tier=train, so the check is the symmetric "existing pod's anti-affinity" one.
+	// Cover the terminating pod's own anti-affinity against the pending pod.
 	preprocessAntiAffineToTrain := func() *tasks_fake.TestTaskBasic {
 		return &tasks_fake.TestTaskBasic{
 			PodAffinityLabels:          preprocessLabels,
@@ -163,7 +158,6 @@ func getAllocatePodAntiAffinityTestsMetadata() []integration_tests_utils.TestTop
 			},
 		},
 		{
-			// Control: without anti-affinity the idle GPU is bound immediately.
 			TestTopologyBasic: test_utils.TestTopologyBasic{
 				Name: "Idle GPU next to a releasing pod with no anti-affinity involved: bind",
 				Jobs: []*jobs_fake.TestJobBasic{
