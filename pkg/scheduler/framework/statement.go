@@ -333,6 +333,22 @@ func (s *Statement) Pipeline(task *pod_info.PodInfo, hostname string, updateTask
 	return nil
 }
 
+// AllocateOrPipeline defers allocation until all readiness checks pass.
+func (s *Statement) AllocateOrPipeline(task *pod_info.PodInfo, hostname string) error {
+	node, found := s.ssn.ClusterInfo.Nodes[hostname]
+	if !found {
+		return fmt.Errorf("failed to find node %s", hostname)
+	}
+	ready, err := s.ssn.IsTaskReadyForBinding(task, node)
+	if err != nil {
+		return err
+	}
+	if !ready {
+		return s.Pipeline(task, hostname, true)
+	}
+	return s.Allocate(task, hostname)
+}
+
 func (s *Statement) Allocate(task *pod_info.PodInfo, hostname string) error {
 	node := s.ssn.ClusterInfo.Nodes[hostname]
 
