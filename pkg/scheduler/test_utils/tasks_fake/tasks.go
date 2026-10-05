@@ -32,7 +32,7 @@ type TestTaskBasic struct {
 	NodeAffinityNames []string
 	Annotations       map[string]string
 	PodAffinityLabels map[string]string
-	// Overrides the anti-affinity selector without changing the pod labels.
+	// Selects pods to repel; does not change this pod's labels.
 	PodAntiAffinitySelector    map[string]string
 	PodAffinityTopologyKey     string
 	PodAntiAffinityTopologyKey string
