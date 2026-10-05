@@ -4,9 +4,14 @@
 package predicates
 
 import (
+	"context"
+	"fmt"
+	"slices"
+
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	k8sframework "k8s.io/kube-scheduler/framework"
+	kubernetesframework "k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/interpodaffinity"
 
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/common_info"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/node_info"
@@ -75,51 +80,72 @@ func (pp *predicatesPlugin) bindReady(task *pod_info.PodInfo, node *node_info.No
 	if len(candidates) == 0 {
 		return true, nil
 	}
-	incomingTerms, err := k8sframework.GetAffinityTerms(task.Pod, taskAntiAffinityRules)
-	if err != nil {
-		return false, err
-	}
 	for _, entry := range candidates {
-		existingTask, existingNode := entry.task, entry.node
-		if existingTask.UID == task.UID {
+		if entry.task.UID == task.UID {
 			continue
 		}
-		conflict, err := pp.releasingAntiAffinityMatches(incomingTerms, existingTask.Pod, node.Node, existingNode.Node)
-		if err != nil || conflict {
-			return false, err
-		}
-		existingTerms, err := k8sframework.GetAffinityTerms(existingTask.Pod,
-			k8sframework.GetPodAntiAffinityTerms(existingTask.Pod.Spec.Affinity))
-		if err != nil {
-			return false, err
-		}
-		conflict, err = pp.releasingAntiAffinityMatches(existingTerms, task.Pod, node.Node, existingNode.Node)
-		if err != nil || conflict {
-			return false, err
+		for _, direction := range []struct {
+			owner, other         *v1.Pod
+			ownerNode, otherNode *v1.Node
+		}{
+			{task.Pod, entry.task.Pod, node.Node, entry.node.Node},
+			{entry.task.Pod, task.Pod, entry.node.Node, node.Node},
+		} {
+			conflict, err := pp.requiredAntiAffinityMatches(direction.owner, direction.other, direction.ownerNode, direction.otherNode)
+			if err != nil || conflict {
+				return false, err
+			}
 		}
 	}
 	return true, nil
 }
 
-func (pp *predicatesPlugin) releasingAntiAffinityMatches(terms []k8sframework.AffinityTerm, pod *v1.Pod,
-	targetNode, existingNode *v1.Node) (bool, error) {
-	for _, term := range terms {
-		targetValue, targetHasKey := targetNode.Labels[term.TopologyKey]
-		existingValue, existingHasKey := existingNode.Labels[term.TopologyKey]
-		if !targetHasKey || !existingHasKey || targetValue != existingValue || !term.Selector.Matches(labels.Set(pod.Labels)) {
-			continue
-		}
-		var namespaceLabels labels.Set
-		if !term.Namespaces.Has(pod.Namespace) && term.NamespaceSelector != labels.Nothing() && !term.NamespaceSelector.Empty() {
-			namespace, err := pp.ssn.Cache.KubeInformerFactory().Core().V1().Namespaces().Lister().Get(pod.Namespace)
-			if err != nil {
-				return false, err
-			}
-			namespaceLabels = labels.Set(namespace.Labels)
-		}
-		if term.Matches(pod, namespaceLabels) {
-			return true, nil
-		}
+type antiAffinityState struct {
+	pod   *v1.Pod
+	state k8sframework.CycleState
+}
+
+func (pp *predicatesPlugin) requiredAntiAffinityMatches(owner, other *v1.Pod, ownerNode, otherNode *v1.Node) (bool, error) {
+	if len(k8sframework.GetPodAntiAffinityTerms(owner.Spec.Affinity)) == 0 {
+		return false, nil
 	}
-	return false, nil
+	plugin := pp.ssn.InternalK8sPlugins().PodAffinity.(*interpodaffinity.InterPodAffinity)
+	prepared, found := pp.antiAffinityStates.Load(owner)
+	if !found {
+		pod := owner.DeepCopy()
+		// Evaluate required anti-affinity independently of ordinary affinity predicates.
+		pod.Spec.Affinity = &v1.Affinity{PodAntiAffinity: pod.Spec.Affinity.PodAntiAffinity}
+		state := kubernetesframework.NewCycleState()
+		_, status := plugin.PreFilter(context.Background(), state, pod, nil)
+		if !status.IsSuccess() {
+			return false, fmt.Errorf("preparing required anti-affinity: %s", status.Message())
+		}
+		prepared, _ = pp.antiAffinityStates.LoadOrStore(owner, antiAffinityState{pod: pod, state: state})
+	}
+	base := prepared.(antiAffinityState)
+	state := base.state.Clone()
+	otherInfo, err := kubernetesframework.NewPodInfo(other)
+	if err != nil {
+		return false, err
+	}
+	otherNodeInfo := kubernetesframework.NewNodeInfo()
+	otherNodeInfo.SetNode(otherNode)
+	status := plugin.AddPod(context.Background(), state, base.pod, otherInfo, otherNodeInfo)
+	if !status.IsSuccess() {
+		return false, status.AsError()
+	}
+	ownerNodeInfo := kubernetesframework.NewNodeInfo()
+	ownerNodeInfo.SetNode(ownerNode)
+	status = plugin.Filter(context.Background(), state, base.pod, ownerNodeInfo)
+	if status.IsSuccess() {
+		return false, nil
+	}
+	if slices.Contains(status.Reasons(), interpodaffinity.ErrReasonAntiAffinityRulesNotMatch) {
+		return true, nil
+	}
+	// The reverse direction is checked separately; ordinary pods belong to predicates.
+	if slices.Contains(status.Reasons(), interpodaffinity.ErrReasonExistingAntiAffinityRulesNotMatch) {
+		return false, nil
+	}
+	return false, status.AsError()
 }

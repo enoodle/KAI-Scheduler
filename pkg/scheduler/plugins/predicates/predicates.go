@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	ksf "k8s.io/kube-scheduler/framework"
@@ -107,6 +108,7 @@ type prePredicateCacheKey struct {
 type predicatesPlugin struct {
 	storageSchedulingEnabled bool
 
+	antiAffinityStates             sync.Map
 	skipPredicates                 SkipPredicates
 	prePredicateCache              map[prePredicateCacheKey]cachedPrePredicateResult
 	ssn                            *framework.Session
@@ -405,6 +407,7 @@ func (pp *predicatesPlugin) evaluateTaskOnPredicates(
 }
 
 func (pp *predicatesPlugin) OnSessionClose(_ *framework.Session) {
+	pp.antiAffinityStates.Clear()
 	pp.releasingTasks = nil
 	pp.releasingTasksWithAntiAffinity = nil
 }

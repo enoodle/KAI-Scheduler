@@ -4,6 +4,7 @@
 package predicates
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -11,16 +12,24 @@ import (
 	"go.uber.org/mock/gomock"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
+	k8sframework "k8s.io/kube-scheduler/framework"
+	"k8s.io/kubernetes/pkg/scheduler/apis/config"
+	kubernetesframework "k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/interpodaffinity"
 
+	"github.com/kai-scheduler/KAI-scheduler/pkg/common/k8s_utils"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/common_info"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/node_info"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/pod_info"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/pod_status"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/cache"
+	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/cache/cluster_info"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/framework"
+	k8splugins "github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/k8s_internal/plugins"
 )
 
 func TestBindReadyWithReleasingPodAntiAffinity(t *testing.T) {
@@ -97,10 +106,10 @@ func TestBindReadyWithReleasingPodAntiAffinity(t *testing.T) {
 			s.victim.Pod.Namespace = "victims"
 			s.victim.Pod.Spec.Affinity = antiAffinity(t)
 		}, ready: false},
-		{name: "namespace lookup failure", modify: func(s *setup) {
+		{name: "namespace selector does not match missing namespace", modify: func(s *setup) {
 			s.victim.Pod.Namespace = "missing"
 			incomingTerm(s).NamespaceSelector = &metav1.LabelSelector{MatchLabels: map[string]string{"team": "victims"}}
-		}, ready: false},
+		}, ready: true},
 		{name: "stuck releasing handled by normal predicates", modify: func(s *setup) { s.victim.Status = pod_status.StuckInReleasing }, ready: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -116,22 +125,80 @@ func TestBindReadyWithReleasingPodAntiAffinity(t *testing.T) {
 			if tc.modify != nil {
 				tc.modify(s)
 			}
-			factory := informers.NewSharedInformerFactory(fake.NewSimpleClientset(), 0)
-			for _, name := range []string{"train", "victims"} {
-				require.NoError(t, factory.Core().V1().Namespaces().Informer().GetIndexer().Add(&v1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{"team": name}}}))
+			plugin, upstream := newBindReadyTestPlugin(t, s.nodes)
+			if len(k8sframework.GetPodAntiAffinityTerms(s.incoming.Pod.Spec.Affinity)) == 0 && len(plugin.releasingTasksWithAntiAffinity) > 0 {
+				_, status := upstream.PreFilter(context.Background(), kubernetesframework.NewCycleState(), s.incoming.Pod, nil)
+				require.True(t, status.IsSkip(), "ordinary incoming preprocessing must skip this symmetric case")
 			}
-			cacheMock := cache.NewMockCache(gomock.NewController(t))
-			cacheMock.EXPECT().KubeInformerFactory().Return(factory).AnyTimes()
-			ssn := &framework.Session{Cache: cacheMock, ClusterInfo: &api.ClusterInfo{Nodes: s.nodes}}
-			plugin := &predicatesPlugin{ssn: ssn}
-			plugin.initializeReleasingTasks()
 			ready, err := plugin.bindReady(s.incoming, s.nodes["node0"])
-			if tc.name == "namespace lookup failure" {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-			}
+			require.NoError(t, err)
 			require.Equal(t, tc.ready, ready)
+		})
+	}
+}
+
+func newBindReadyTestPlugin(t *testing.T, nodes map[string]*node_info.NodeInfo) (*predicatesPlugin, *interpodaffinity.InterPodAffinity) {
+	t.Helper()
+	client := fake.NewClientset()
+	factory := informers.NewSharedInformerFactory(client, 0)
+	for _, name := range []string{"train", "victims"} {
+		require.NoError(t, factory.Core().V1().Namespaces().Informer().GetIndexer().Add(&v1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{"team": name}},
+		}))
+	}
+	index := cache.NewK8sClusterPodAffinityInfo()
+	for _, node := range nodes {
+		info := cluster_info.NewK8sNodePodAffinityInfo(node.Node, index)
+		for _, task := range node.PodInfos {
+			if task.Status != pod_status.Releasing {
+				info.AddPod(task.Pod)
+			}
+		}
+	}
+	handle := k8s_utils.NewFrameworkHandle(client, factory, index)
+	upstream, err := interpodaffinity.New(context.Background(), &config.InterPodAffinityArgs{}, handle, k8s_utils.GetK8sFeatures())
+	require.NoError(t, err)
+	cacheMock := cache.NewMockCache(gomock.NewController(t))
+	cacheMock.EXPECT().InternalK8sPlugins().Return(&k8splugins.K8sPlugins{PodAffinity: upstream}).AnyTimes()
+	pp := &predicatesPlugin{ssn: &framework.Session{Cache: cacheMock, ClusterInfo: &api.ClusterInfo{Nodes: nodes}}}
+	pp.initializeReleasingTasks()
+	return pp, upstream.(*interpodaffinity.InterPodAffinity)
+}
+
+func TestBindReadySeparatesReleasingAntiAffinity(t *testing.T) {
+	for _, symmetric := range []bool{false, true} {
+		t.Run(fmt.Sprintf("symmetric-%t", symmetric), func(t *testing.T) {
+			term := func(tier string) v1.PodAffinityTerm {
+				return v1.PodAffinityTerm{TopologyKey: "kubernetes.io/hostname", LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"tier": tier}}}
+			}
+			pod := func(name string) *pod_info.PodInfo {
+				return &pod_info.PodInfo{UID: common_info.PodID(name), Pod: &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, UID: types.UID(name), Namespace: "train", Labels: map[string]string{"tier": name}}}}
+			}
+			incoming, victim, ordinary := pod("incoming"), pod("victim"), pod("ordinary")
+			victim.Status = pod_status.Releasing
+			ordinary.Status = pod_status.Running
+			owner, other := incoming, victim
+			if symmetric {
+				owner, other = victim, incoming
+			}
+			owner.Pod.Spec.Affinity = &v1.Affinity{
+				PodAffinity:     &v1.PodAffinity{RequiredDuringSchedulingIgnoredDuringExecution: []v1.PodAffinityTerm{term("absent")}},
+				PodAntiAffinity: &v1.PodAntiAffinity{RequiredDuringSchedulingIgnoredDuringExecution: []v1.PodAffinityTerm{term(string(other.UID))}},
+			}
+			ordinary.Pod.Spec.Affinity = &v1.Affinity{PodAntiAffinity: &v1.PodAntiAffinity{RequiredDuringSchedulingIgnoredDuringExecution: []v1.PodAffinityTerm{term(string(owner.UID))}}}
+			nodes := map[string]*node_info.NodeInfo{}
+			for _, name := range []string{"node0", "node1"} {
+				nodes[name] = &node_info.NodeInfo{Node: &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{"kubernetes.io/hostname": name}}}}
+			}
+			nodes["node0"].PodInfos = map[common_info.PodID]*pod_info.PodInfo{victim.UID: victim, ordinary.UID: ordinary}
+			pp, _ := newBindReadyTestPlugin(t, nodes)
+			original := owner.Pod.DeepCopy()
+			for _, name := range []string{"node0", "node1", "node0"} {
+				ready, err := pp.bindReady(incoming, nodes[name])
+				require.NoError(t, err)
+				require.Equal(t, name == "node1", ready)
+			}
+			require.Equal(t, original, owner.Pod)
 		})
 	}
 }
