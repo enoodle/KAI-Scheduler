@@ -67,15 +67,15 @@ func (pp *predicatesPlugin) bindReady(task *pod_info.PodInfo, node *node_info.No
 	if len(pp.releasingTasks) == 0 {
 		return true, nil
 	}
-	incomingRules := k8sframework.GetPodAntiAffinityTerms(task.Pod.Spec.Affinity)
+	taskAntiAffinityRules := k8sframework.GetPodAntiAffinityTerms(task.Pod.Spec.Affinity)
 	candidates := pp.releasingTasksWithAntiAffinity
-	if len(incomingRules) > 0 {
+	if len(taskAntiAffinityRules) > 0 {
 		candidates = pp.releasingTasks
 	}
 	if len(candidates) == 0 {
 		return true, nil
 	}
-	incomingTerms, err := k8sframework.GetAffinityTerms(task.Pod, incomingRules)
+	incomingTerms, err := k8sframework.GetAffinityTerms(task.Pod, taskAntiAffinityRules)
 	if err != nil {
 		return false, err
 	}
