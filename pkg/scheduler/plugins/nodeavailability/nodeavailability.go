@@ -24,13 +24,21 @@ func (pp *nodeAvailabilityPlugin) Name() string {
 }
 
 func (pp *nodeAvailabilityPlugin) OnSessionOpen(ssn *framework.Session) {
-	ssn.AddNodeOrderFn(pp.nodeOrderFn)
+	ssn.AddNodeOrderFn(func(task *pod_info.PodInfo, node *node_info.NodeInfo) (float64, error) {
+		return pp.nodeOrderFn(ssn, task, node)
+	})
 }
 
-func (pp *nodeAvailabilityPlugin) nodeOrderFn(task *pod_info.PodInfo, node *node_info.NodeInfo) (float64, error) {
+func (pp *nodeAvailabilityPlugin) nodeOrderFn(ssn *framework.Session, task *pod_info.PodInfo, node *node_info.NodeInfo) (float64, error) {
 	score := 0.0
 	if taskAllocatable := node.IsTaskAllocatable(task); taskAllocatable {
-		score = scores.Availability
+		ready, err := ssn.IsTaskReadyForBinding(task, node)
+		if err != nil {
+			return 0, err
+		}
+		if ready {
+			score = scores.Availability
+		}
 	}
 
 	log.InfraLogger.V(7).Do(func() {

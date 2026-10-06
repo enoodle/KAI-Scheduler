@@ -18,6 +18,7 @@ import (
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/pod_info"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/pod_status"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/podgroup_info"
+	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/constants"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/test_utils"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/test_utils/jobs_fake"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/test_utils/nodes_fake"
@@ -70,6 +71,52 @@ func TestAllocateJobBindingReadiness(t *testing.T) {
 				require.NoError(t, stmt.Rollback(checkpoint))
 				require.Equal(t, pod_status.Pending, task.Status)
 				require.Empty(t, ssn.ClusterInfo.Nodes["node0"].PodInfos)
+			})
+		}
+	}
+}
+
+func TestAllocateJobPrefersBindingReadyNode(t *testing.T) {
+	defer gock.Off()
+	test_utils.InitTestingInfrastructure()
+	const hostname = "kubernetes.io/hostname"
+	for _, gpus := range []float64{1, 0.5} {
+		for _, symmetric := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%g-gpus-symmetric-%t", gpus, symmetric), func(t *testing.T) {
+				victim := &tasks_fake.TestTaskBasic{State: pod_status.Releasing, NodeName: "node0", PodAffinityLabels: map[string]string{"tier": "victim"}}
+				incoming := &tasks_fake.TestTaskBasic{State: pod_status.Pending, PodAffinityLabels: map[string]string{"tier": "train"}, PodAntiAffinitySelector: map[string]string{"tier": "victim"}, PodAntiAffinityTopologyKey: hostname}
+				if symmetric {
+					incoming.PodAntiAffinitySelector = nil
+					victim.PodAntiAffinitySelector = map[string]string{"tier": "train"}
+					victim.PodAntiAffinityTopologyKey = hostname
+				}
+				ssn := test_utils.BuildSession(test_utils.TestTopologyBasic{
+					Nodes: map[string]nodes_fake.TestNodeBasic{
+						"node0": {GPUs: 4, Labels: map[string]string{hostname: "node0"}},
+						"node1": {GPUs: 4, Labels: map[string]string{hostname: "node1"}},
+					},
+					Queues: []test_utils.TestQueueBasic{{Name: "queue0", DeservedGPUs: 8, GPUOverQuotaWeight: 1}},
+					Jobs: []*jobs_fake.TestJobBasic{
+						{Name: "victim", QueueName: "queue0", Priority: constants.PriorityTrainNumber, RequiredGPUsPerTask: 1, Tasks: []*tasks_fake.TestTaskBasic{victim}},
+						{Name: "incoming", QueueName: "queue0", Priority: constants.PriorityTrainNumber, RequiredGPUsPerTask: gpus, Tasks: []*tasks_fake.TestTaskBasic{incoming}},
+					},
+					Mocks: &test_utils.TestMock{CacheRequirements: &test_utils.CacheMocking{}},
+				}, gomock.NewController(t))
+				ssn.AddNodeOrderFn(func(_ *pod_info.PodInfo, node *node_info.NodeInfo) (float64, error) {
+					if node.Name == "node0" {
+						return 1, nil
+					}
+					return 0, nil
+				})
+				job := ssn.ClusterInfo.PodGroupInfos["incoming"]
+				stmt := ssn.Statement()
+				checkpoint := stmt.Checkpoint()
+				require.True(t, common.AllocateJob(ssn, stmt, []*node_info.NodeInfo{ssn.ClusterInfo.Nodes["node0"], ssn.ClusterInfo.Nodes["node1"]}, job, podgroup_info.RealTaskAllocation))
+				for _, task := range job.GetAllPodsMap() {
+					require.Equal(t, "node1", task.NodeName)
+					require.Equal(t, pod_status.Allocated, task.Status)
+				}
+				require.NoError(t, stmt.Rollback(checkpoint))
 			})
 		}
 	}
