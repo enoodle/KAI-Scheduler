@@ -210,18 +210,25 @@ func allocateTaskToNode(ssn *framework.Session, stmt *framework.Statement, task 
 	}
 
 	if taskAllocatable := node.IsTaskAllocatable(task); !isPipelineOnly && taskAllocatable {
-		return allocateOrPipelineTaskToNode(ssn, stmt, task, node)
+		ready, err := ssn.IsTaskReadyForBinding(task, node)
+		if err != nil {
+			log.InfraLogger.Errorf("Failed to evaluate binding readiness for task %v on %v: %v", task.UID, node.Name, err)
+			return false
+		}
+		if ready {
+			return allocateTaskOnNode(ssn, stmt, task, node)
+		}
 	}
 	return pipelineTaskToNode(ssn, stmt, task, node, !isPipelineOnly)
 }
 
-func allocateOrPipelineTaskToNode(ssn *framework.Session, stmt *framework.Statement, task *pod_info.PodInfo, node *node_info.NodeInfo) bool {
+func allocateTaskOnNode(ssn *framework.Session, stmt *framework.Statement, task *pod_info.PodInfo, node *node_info.NodeInfo) bool {
 	log.InfraLogger.V(6).Do(func() {
 		log.InfraLogger.Infof("Placing Task <%v/%v> on node <%v>, requires resources: %v",
 			task.Namespace, task.Name, node.Name, task.ResReqVector)
 	})
 
-	if err := stmt.AllocateOrPipeline(task, node.Name); err != nil {
+	if err := stmt.Allocate(task, node.Name); err != nil {
 		log.InfraLogger.Errorf("Failed to place Task %v on %v in Session %v, err: %v", task.UID, node.Name, ssn.ID, err)
 		return false
 	}
