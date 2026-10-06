@@ -25,7 +25,7 @@ Related issue: [#2319](https://github.com/kai-scheduler/KAI-Scheduler/issues/231
 
 ## Summary
 
-The scheduler will plan all actions against one mutable, in-memory session, then resolve and execute their surviving Kubernetes effects at the end of the session. A later eviction of a Pod newly allocated or pipelined in that session cancels that earlier placement before either operation reaches Kubernetes. Surviving BindRequests and evictions run through bounded workers; the scheduler goroutine owns journal resolution, cache publication, and session-state finalization.
+The scheduler will plan all actions against one mutable, in-memory session, then resolve and execute their surviving Kubernetes effects at the end of the session. A later eviction of a Pod newly allocated or pipelined in that session cancels that earlier placement before either operation reaches Kubernetes. Surviving BindRequests and evictions run through bounded workers, which publish accepted BindRequests to the informer store; the scheduler goroutine owns journal resolution and session-state finalization.
 
 ## Motivation
 
@@ -40,8 +40,8 @@ For example, fixing [issue #2274](https://github.com/kai-scheduler/KAI-Scheduler
 - Create surviving BindRequests in parallel instead of serially as on main, and dispatch independent evictions concurrently.
 - Avoid Kubernetes writes for superseded operations; give the scheduler a session-wide commit plan that can cancel, coalesce, and order effects after all actions have run.
 - Cancel a same-session pending Pod's allocation or pipeline when later evicted, without a BindRequest, deletion, scheduler Event, Pod condition, or PodGroup status effect from that pair; preserve evictions of Pods already active at session open.
-- Let later actions inspect virtual placements and evictions while keeping `Session`, plugin, `NodeInfo`, and informer-store mutations single-threaded.
-- Create BindRequests idempotently, publish successful requests to the scheduler's informer store, and require Binder to verify the target Pod UID.
+- Let later actions inspect virtual placements and evictions while keeping `Session`, plugin, and `NodeInfo` mutations single-threaded; workers publish accepted BindRequests through the thread-safe informer store.
+- Create BindRequests idempotently, publish successful requests to the scheduler cache, and require Binder to verify the target Pod UID.
 
 ### Non-Goals
 
@@ -86,8 +86,8 @@ Open session and record authoritative starting identities before plugin hooks
   -> finish pre-close planning hooks (including background-pod restoration)
   -> normalize journal and reconcile canceled virtual state
   -> freeze immutable external-effect payloads
-  -> dispatch surviving operations with bounded workers
-  -> apply worker results on scheduler goroutine; drain and join
+  -> dispatch surviving operations; workers publish accepted BindRequests
+  -> drain and join workers; apply results on scheduler goroutine
   -> close plugin state; record final PodGroup/Pod statuses; release session
 ```
 
@@ -99,7 +99,7 @@ The close path needs a planning phase before plugin teardown. `backgroundpods.On
 
 An accepted statement contributes ordered records containing action provenance, Pod namespace/name/UID, initial state identity, operation kind, immutable placement or eviction metadata, and a sequence number. The journal does not retain mutable `PodInfo` or a live `Statement` as worker input. Placement payloads must include GPU, NUMA, DRA, labels, annotations, and node selection after plugin mutation.
 
-`Statement.Evict`, `Statement.Allocate`, `Statement.Pipeline`, and restoration operations must validate transitions against the current virtual state and placement constraints when called. They reject duplicate evictions, conflicting placements, and invalid dependencies immediately, before changing state or recording an intent. Actions handle these errors while planning; normalization folds valid transitions rather than resolving invalid plans by dropping individual Pods or abandoning the session.
+`Statement.Evict`, `Statement.Allocate`, `Statement.Pipeline`, and restoration operations validate journal-specific transitions against the current virtual state. They reject duplicate evictions, conflicting intents, and same-UID rebinding of an already active Pod before changing state or recording an intent. Existing scheduling paths remain responsible for resource-fit checks; statements do not repeat those checks. Actions handle journal errors while planning; normalization folds valid transitions rather than resolving invalid plans by dropping individual Pods or abandoning the session.
 
 Single-threaded normalization folds the records for each UID against that Pod's session-opening state:
 
@@ -107,19 +107,21 @@ Single-threaded normalization folds the records for each UID against that Pod's 
 2. Preserve each surviving virtual transition for later action decisions, but collapse its external effect at the end.
 3. Cancel an Allocate/Pipeline followed by Evict when the Pod was Pending at session open and no prior external placement existed.
 4. Preserve an eviction of a Pod active at session open unless it was restored without changing its original placement. A changed placement of an already bound Pod cannot become a new BindRequest for that UID.
+
+   Existing reclaim/consolidation simulations may pipeline an evicted active Pod elsewhere to model its future replacement. Preserve that simulation, but retain the original-UID eviction; neither a new BindRequest nor a pipeline Event is committed for that UID.
 5. Restore canceled pending tasks to their original in-memory state before job-status recording: remove their virtual node charge, clear placement, and return them to Pending. The Allocate and Deallocate plugin callbacks have already offset each other; do not apply a second Deallocate callback. Assert the final node and queue accounting against the session-opening state plus surviving intents.
 
-An eviction of a newly allocated/pipelined Pod is a cancellation, not a real capacity release. Placement operations must distinguish physically idle capacity, including capacity returned by a canceled virtual allocation, from capacity promised by real evictions. Work depending on a real eviction remains pipelined and never creates a BindRequest in this session. Record causal links to victim decisions during planning and reject invalid capacity assumptions at the statement operation that introduces them.
+An eviction of a newly allocated/pipelined Pod is a cancellation, not a real capacity release. Existing placement logic continues to distinguish physically idle capacity, including capacity returned by a canceled virtual allocation, from capacity promised by real evictions. Work depending on a real eviction remains pipelined and never creates a BindRequest in this session.
 
 An accepted eviction immediately marks the Pod Releasing, excluding it from later victim selection. There can be only one surviving eviction per UID, carrying its action's reason and preemptor. If an eviction is undone and a later action evicts the restored Pod, only the later eviction survives. A canceled pair emits neither operation's Events or status updates.
 
 ### External effects and ordering
 
-After normalization, a bounded pool performs only immutable API calls. Workers do not call session methods, mutate informer stores, or emit Events. Start with one `max(1, ceil(k8sClientQPS))` concurrency budget shared by BindRequest Creates and Pod Deletes; each client still applies its own rate limiter. The finite journal is the pending queue. Per-UID deduplication prevents concurrent effects on one Pod. Independent UIDs can dispatch in parallel. If a real allocation depends on an eviction's completion, it remains pipelined and is not bound at this boundary.
+After normalization, a bounded pool performs immutable API calls and publishes accepted BindRequests directly to the thread-safe informer store. Each worker inserts a deep copy immediately after a successful Create or matching `AlreadyExists` recovery, preserving `origin/main` publication behavior without a separate reservation overlay or routine refresh Gets. Workers do not call session methods or emit Events. Start with one `max(1, ceil(k8sClientQPS))` concurrency budget shared by BindRequest Creates and Pod Deletes; each client still applies its own rate limiter. The finite journal is the pending queue. Per-UID deduplication prevents concurrent effects on one Pod. Independent UIDs can dispatch in parallel. If a real allocation depends on an eviction's completion, it remains pipelined and is not bound at this boundary.
 
 BindRequest workers use deterministic names, up to five attempts for transient API errors with a 20 ms initial backoff, and a direct Get plus intent comparison on `AlreadyExists`. Cancellation stops queued and in-flight attempts. Binder verifies that the fetched Pod UID matches the BindRequest's Pod owner-reference UID before binding or updating Pod status. Eviction workers must verify the target UID and use a Kubernetes Delete UID precondition; a same-name replacement must never be deleted. A surviving eviction's optional Pod-condition patch also needs an atomic UID check. Refactor `SchedulerCache.Evict` so the worker reports the Delete outcome rather than launching another untracked goroutine. Emit eviction status/Event only for a surviving, confirmed Delete request, not for a canceled intent or failed precondition.
 
-The scheduler goroutine consumes results, publishes successful BindRequests to the scheduler informer store without overwriting newer same-UID data, updates task state, then emits surviving Events and status changes. `StatusUpdater.PreBind`, Pod-label patches, `Scheduled`, `Pipelined`, and eviction reporting move to this finalization path. Pod-label and status writes must be guarded by UID so they cannot affect a same-name replacement. `RecordJobStatusEvent` runs only after journal normalization and result handling; otherwise a canceled virtual transition can leak as a PodGroup status/Event. No worker may mutate plugin accounting.
+After all workers join, the scheduler goroutine consumes results, updates task state, then emits surviving Events and status changes. `StatusUpdater.PreBind`, Pod-label patches, `Scheduled`, `Pipelined`, and eviction reporting move to this finalization path. Pod-label and status writes must be guarded by UID so they cannot affect a same-name replacement. `RecordJobStatusEvent` runs only after journal normalization and result handling; otherwise a canceled virtual transition can leak as a PodGroup status/Event. No worker may mutate plugin accounting. Direct store insertion retains the existing race with newer informer watch updates; this change does not add conditional publication semantics.
 
 ### Failures, shutdown, and restart
 
@@ -136,7 +138,7 @@ The separate scenario-validation fix can reduce simulation work by ordering only
 
 ### Implementation scope
 
-- `framework.Statement`: validate transitions and dependencies at each operation; transfer valid operations as immutable records; keep rollback semantics for unaccepted statements.
+- `framework.Statement`: validate journal-specific transitions; transfer valid operations as immutable records; keep rollback semantics for unaccepted statements.
 - `framework.Session` and scheduler run loop: own the journal, pre-close planning, normalization, bounded executor, and finalization barrier.
 - Allocate/Reclaim/Preempt/Consolidation/StaleGangEviction: accept virtual statements without external commits; make stale gang eviction virtual.
 - `backgroundpods` and session lifecycle: separate final planning from plugin teardown.
@@ -149,7 +151,7 @@ Record planned, canceled, surviving, dispatched, succeeded, and failed operation
 
 ### Test plan
 
-1. Unit tests for statement transfer, undo filtering, UID folding, plugin-state consistency, and final job-status projection. Verify invalid transitions, duplicate evictions, and invalid dependencies fail at the statement call without changing state or recording an intent.
+1. Unit tests for statement transfer, undo filtering, UID folding, plugin-state consistency, and final job-status projection. Verify invalid journal transitions, duplicate evictions, conflicting intents, and same-UID rebinding fail at the statement call without changing state or recording an intent.
 2. Session tests for Allocate -> Reclaim/Preempt/Consolidation cancellation, pipeline -> eviction cancellation, active-Pod eviction, same-placement Unevict, stale gang eviction, and background-pod restoration.
 3. Fake-client tests asserting zero Create/Delete/Event/status calls for canceled pairs and exactly one UID-safe effect for surviving intents, including same-name replacement and ambiguous API results.
 4. Envtest with a real API server and Binder: no BindRequest or Pod deletion for a canceled pending Pod; surviving BindRequests are visible before the next session; interrupted or partially failed dispatch converges on the next session.
