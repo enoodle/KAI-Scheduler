@@ -15,7 +15,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
-	v2 "github.com/kai-scheduler/KAI-scheduler/pkg/apis/scheduling/v2"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/common/constants"
 	testcontext "github.com/kai-scheduler/KAI-scheduler/test/e2e/modules/context"
 	"github.com/kai-scheduler/KAI-scheduler/test/e2e/modules/resources/rd"
@@ -47,7 +46,7 @@ var _ = Describe("Reclaim with pod anti-affinity", Label("nightly"), func() {
 			totalGPUs += float64(gpus.Value())
 		}
 		parent, victimQueue, reclaimerQueue := CreateQueues(totalGPUs, 0, 1)
-		testCtx.InitQueues([]*v2.Queue{parent, victimQueue, reclaimerQueue})
+		testCtx.InitQueues(append(testCtx.Queues, parent, victimQueue, reclaimerQueue))
 		victimNamespace := queue.GetConnectedNamespaceToQueue(victimQueue)
 		victimLabel := "reclaim-affinity-victim"
 		victims := make([]*v1.Pod, 0, 2)
