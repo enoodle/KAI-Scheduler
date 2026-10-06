@@ -145,7 +145,7 @@ The separate scenario-validation fix can reduce simulation work by ordering only
 
 ### Monitoring
 
-Record planned, canceled, surviving, dispatched, succeeded, and failed operations by kind and action; queue depth, worker count, dispatch and drain duration; API retry/throttle rates; BindRequest and eviction latency; informer publication failures; and unexpected same-UID conflicts. Do not use Pod UID as a metric label. Keep per-session structured logs with action sequence, Pod UID, resolution reason, and API outcome. Compare `Scheduled`, `Pipelined`, and `Evict` Event counts with surviving intents in tests and during rollout.
+Record planned, canceled, surviving, dispatched, succeeded, and failed operations by kind and action; queue depth, dispatch and drain duration; API retry/throttle rates; BindRequest and eviction latency; informer publication failures; and unexpected same-UID conflicts. Do not use Pod UID as a metric label. Keep per-session structured logs with action sequence, Pod UID, resolution reason, and API outcome. Compare `Scheduled`, `Pipelined`, and `Evict` Event counts with surviving intents in tests and during rollout.
 
 ### Test plan
 
