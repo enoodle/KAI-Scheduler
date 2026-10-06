@@ -32,6 +32,15 @@ import (
 	k8splugins "github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/k8s_internal/plugins"
 )
 
+func TestPluginWithoutPodAffinity(t *testing.T) {
+	cacheMock := cache.NewMockCache(gomock.NewController(t))
+	cacheMock.EXPECT().InternalK8sPlugins().Return(&k8splugins.K8sPlugins{})
+	ssn := &framework.Session{Cache: cacheMock}
+	pp := &predicatesPlugin{ssn: ssn}
+	pp.initializeBindReadiness()
+	require.Empty(t, ssn.BindReadyFns)
+}
+
 func TestBindReadyWithReleasingPodAntiAffinity(t *testing.T) {
 	const hostname = "kubernetes.io/hostname"
 	const zone = "topology.kubernetes.io/zone"

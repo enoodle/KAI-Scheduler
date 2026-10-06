@@ -25,6 +25,14 @@ type releasingTask struct {
 	node *node_info.NodeInfo
 }
 
+func (pp *predicatesPlugin) initializeBindReadiness() {
+	if pp.ssn.InternalK8sPlugins().PodAffinity == nil {
+		return
+	}
+	pp.initializeReleasingTasks()
+	pp.ssn.AddBindReadyFn(pp.bindReady)
+}
+
 func (pp *predicatesPlugin) initializeReleasingTasks() {
 	pp.releasingTasks = make(map[common_info.PodID]releasingTask)
 	pp.releasingTasksWithAntiAffinity = make(map[common_info.PodID]releasingTask)

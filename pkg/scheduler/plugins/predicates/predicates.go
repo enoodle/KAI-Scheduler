@@ -132,10 +132,7 @@ func (pp *predicatesPlugin) OnSessionOpen(ssn *framework.Session) {
 	pp.skipPredicates = SkipPredicates{}
 	pp.resetPrePredicateCache()
 	pp.ssn = ssn
-	if ssn.InternalK8sPlugins().PodAffinity != nil {
-		pp.initializeReleasingTasks()
-		ssn.AddBindReadyFn(pp.bindReady)
-	}
+	pp.initializeBindReadiness()
 
 	ssn.AddPrePredicateFn(func(task *pod_info.PodInfo, _ *podgroup_info.PodGroupInfo) error {
 		return pp.evaluateTaskOnPrePredicate(task, k8sPredicates)
@@ -410,4 +407,5 @@ func (pp *predicatesPlugin) OnSessionClose(_ *framework.Session) {
 	pp.antiAffinityStates.Clear()
 	pp.releasingTasks = nil
 	pp.releasingTasksWithAntiAffinity = nil
+	pp.ssn = nil
 }

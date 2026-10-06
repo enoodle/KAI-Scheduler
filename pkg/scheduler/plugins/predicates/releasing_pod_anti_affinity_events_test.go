@@ -14,12 +14,45 @@ import (
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/eviction_info"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/pod_info"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/pod_status"
+	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/conf"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/constants"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/test_utils"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/test_utils/jobs_fake"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/test_utils/nodes_fake"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/test_utils/tasks_fake"
 )
+
+func TestBindReadinessIndependentOfAffinityScoring(t *testing.T) {
+	defer gock.Off()
+	test_utils.InitTestingInfrastructure()
+	const hostname = "kubernetes.io/hostname"
+	for _, scoring := range []bool{false, true} {
+		t.Run(fmt.Sprintf("scoring-%t", scoring), func(t *testing.T) {
+			plugins := []conf.PluginOption{{Name: "predicates"}}
+			if scoring {
+				plugins = append(plugins, conf.PluginOption{Name: "podaffinity"})
+			}
+			ssn := test_utils.BuildSession(test_utils.TestTopologyBasic{
+				Nodes:  map[string]nodes_fake.TestNodeBasic{"node0": {GPUs: 4, Labels: map[string]string{hostname: "node0"}}},
+				Queues: []test_utils.TestQueueBasic{{Name: "queue0", DeservedGPUs: 4, GPUOverQuotaWeight: 1}},
+				Jobs: []*jobs_fake.TestJobBasic{
+					{Name: "victim", QueueName: "queue0", RequiredGPUsPerTask: 1, Tasks: []*tasks_fake.TestTaskBasic{{State: pod_status.Releasing, NodeName: "node0", PodAffinityLabels: map[string]string{"tier": "victim"}}}},
+					{Name: "incoming", QueueName: "queue0", RequiredGPUsPerTask: 1, Tasks: []*tasks_fake.TestTaskBasic{{State: pod_status.Pending, PodAntiAffinitySelector: map[string]string{"tier": "victim"}, PodAntiAffinityTopologyKey: hostname}}},
+				},
+				Mocks: &test_utils.TestMock{
+					CacheRequirements: &test_utils.CacheMocking{},
+					SchedulerConf:     &conf.SchedulerConfiguration{Actions: "allocate", Tiers: []conf.Tier{{Plugins: plugins}}},
+				},
+			}, gomock.NewController(t))
+			require.Len(t, ssn.BindReadyFns, 1)
+			for _, task := range ssn.ClusterInfo.PodGroupInfos["incoming"].GetAllPodsMap() {
+				ready, err := ssn.IsTaskReadyForBinding(task, ssn.ClusterInfo.Nodes["node0"])
+				require.NoError(t, err)
+				require.False(t, ready)
+			}
+		})
+	}
+}
 
 func TestReleasingTaskSetsTrackStatementChanges(t *testing.T) {
 	defer gock.Off()
