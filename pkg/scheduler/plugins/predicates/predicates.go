@@ -23,10 +23,10 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"sync"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	ksf "k8s.io/kube-scheduler/framework"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/interpodaffinity"
 
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/common_info"
@@ -40,6 +40,7 @@ import (
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/k8s_internal/predicates"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/log"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/plugins/gpusharingnodevalidation"
+	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/plugins/predicates/antiaffinity"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/scheduler_util"
 )
 
@@ -108,12 +109,10 @@ type prePredicateCacheKey struct {
 type predicatesPlugin struct {
 	storageSchedulingEnabled bool
 
-	antiAffinityStates             sync.Map
-	skipPredicates                 SkipPredicates
-	prePredicateCache              map[prePredicateCacheKey]cachedPrePredicateResult
-	ssn                            *framework.Session
-	releasingTasks                 map[common_info.PodID]releasingTask
-	releasingTasksWithAntiAffinity map[common_info.PodID]releasingTask
+	skipPredicates    SkipPredicates
+	prePredicateCache map[prePredicateCacheKey]cachedPrePredicateResult
+	ssn               *framework.Session
+	bindReadiness     antiaffinity.BindReadiness
 }
 
 func New(_ framework.PluginArguments) framework.Plugin {
@@ -404,8 +403,15 @@ func (pp *predicatesPlugin) evaluateTaskOnPredicates(
 }
 
 func (pp *predicatesPlugin) OnSessionClose(_ *framework.Session) {
-	pp.antiAffinityStates.Clear()
-	pp.releasingTasks = nil
-	pp.releasingTasksWithAntiAffinity = nil
+	pp.bindReadiness = nil
 	pp.ssn = nil
+}
+
+func (pp *predicatesPlugin) initializeBindReadiness() {
+	plugin := pp.ssn.InternalK8sPlugins().PodAffinity
+	if plugin == nil {
+		return
+	}
+	pp.bindReadiness = antiaffinity.New(pp.ssn.ClusterInfo.Nodes, plugin.(*interpodaffinity.InterPodAffinity))
+	pp.ssn.AddBindReadyFn(pp.bindReadiness.IsReadyForBinding)
 }
