@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	. "go.uber.org/mock/gomock"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -63,13 +64,61 @@ func TestNodeInfoReleasingPodAffinity(t *testing.T) {
 			task := pod_info.NewTaskInfo(pod, vectorMap)
 			task.Status, task.IsVirtualStatus = tt.add.status, tt.add.virtual
 			assert.NoError(t, ni.AddTask(task))
+			assertReleasingPods(t, ni, task, tt.add.status)
 			if tt.update != nil {
 				task.Status, task.IsVirtualStatus = tt.update.status, tt.update.virtual
+				assertReleasingPods(t, ni, task, tt.add.status)
 				assert.NoError(t, ni.UpdateTask(task))
+				assertReleasingPods(t, ni, task, tt.update.status)
 			}
 			if tt.remove {
 				assert.NoError(t, ni.RemoveTask(task))
+				assert.Empty(t, ni.ReleasingPods)
 			}
 		})
 	}
+}
+
+func TestReleasingPodsWithZeroTrackedResources(t *testing.T) {
+	affinity := pod_affinity.NewMockNodePodAffinityInfo(NewController(t))
+	node := common_info.BuildNode("n1", common_info.BuildResourceList("8000m", "10G"))
+	delete(node.Status.Allocatable, v1.ResourcePods)
+	vectorMap := resource_info.NewResourceVectorMap()
+	vectorMap.AddResourceList(node.Status.Allocatable)
+	ni := NewNodeInfo(node, affinity, vectorMap)
+
+	var tasks []*pod_info.PodInfo
+	for _, name := range []string{"first", "second"} {
+		pod := common_info.BuildPod("ns", name, "n1", v1.PodRunning, v1.ResourceList{}, nil, nil, nil)
+		task := pod_info.NewTaskInfo(pod, vectorMap)
+		task.Status = pod_status.Releasing
+		require.NoError(t, ni.AddTask(task))
+		tasks = append(tasks, task)
+	}
+	require.Len(t, ni.ReleasingPods, 2)
+	require.True(t, ni.ReleasingVector.IsZero())
+	stored := ni.ReleasingPods[pod_info.PodKey(tasks[0].Pod)]
+	require.Error(t, ni.AddTask(tasks[0]))
+	require.Same(t, stored, ni.ReleasingPods[pod_info.PodKey(tasks[0].Pod)])
+
+	tasks[0].Status = pod_status.Running
+	require.NoError(t, ni.RemoveTask(tasks[0]))
+	require.Len(t, ni.ReleasingPods, 1)
+	require.Error(t, ni.RemoveTask(tasks[0]))
+	require.Len(t, ni.ReleasingPods, 1)
+	require.NoError(t, ni.RemoveTask(tasks[1]))
+	require.Empty(t, ni.ReleasingPods)
+}
+
+func assertReleasingPods(t *testing.T, node *NodeInfo, task *pod_info.PodInfo, status pod_status.PodStatus) {
+	t.Helper()
+	if status != pod_status.Releasing {
+		assert.Empty(t, node.ReleasingPods)
+		return
+	}
+	key := pod_info.PodKey(task.Pod)
+	assert.Len(t, node.ReleasingPods, 1)
+	assert.Same(t, node.PodInfos[key], node.ReleasingPods[key])
+	assert.NotSame(t, task, node.ReleasingPods[key])
+	assert.Equal(t, status, node.ReleasingPods[key].Status)
 }
