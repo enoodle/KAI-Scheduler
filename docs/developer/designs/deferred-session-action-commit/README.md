@@ -13,6 +13,7 @@ Related issue: [#2319](https://github.com/kai-scheduler/KAI-Scheduler/issues/231
 - [Design Details](#design-details)
   - [Session lifecycle](#session-lifecycle)
   - [Journal and normalization](#journal-and-normalization)
+    - [Baseline capture](#baseline-capture)
   - [External effects and ordering](#external-effects-and-ordering)
   - [Failures, shutdown, and restart](#failures-shutdown-and-restart)
   - [Related scenario-validation work](#related-scenario-validation-work)
@@ -115,6 +116,16 @@ An eviction of a newly allocated/pipelined Pod is a cancellation, not a real cap
 
 An accepted eviction immediately marks the Pod Releasing, excluding it from later victim selection. There can be only one surviving eviction per UID, carrying its action's reason and preemptor. If an eviction is undone and a later action evicts the restored Pod, only the later eviction survives. A canceled pair emits neither operation's Events or status updates.
 
+#### Baseline capture
+
+Before plugin hooks, record only each Pod UID's opening status and external BindRequest presence from task references and raw snapshot-map entries, including failed requests. Preserve opening job-start timestamps separately. These records retain no Kubernetes objects; do not deep-copy every Pod at session opening.
+
+Lazily capture one owned baseline per touched UID, independent of accepted effects and retained through replacement, tentative rollback, and accepted Unevict. Include status, node, virtual-status marker, fractional GPU groups, NUMA placement, DRA claim allocations, extended resource claim UID/allocation, accepted GPU requirement/resource vector, and received resource type. Deep-copy nested mutable placement values and clone again on restoration; the baseline is not an executable action.
+
+Capture idempotently before pre-predicate/predicate callbacks, NUMA evaluation, fractional GPU selection, and direct Statement mutations, including opening background-pod eviction. Acceptance or `Statement.Allocate` alone is too late. Opening NUMA hydration reconstructs physical placement from persisted records; preserve this authoritative original placement separately from speculative mutations, without reordering hooks or changing accounting. Never reconstruct a baseline from later virtual state.
+
+Per-operation undo records hold the immediately preceding state, separately from the session baseline and accepted-effect copies. Eviction undo needs only node, status, virtual marker, GPU groups, NUMA placement, and DRA claims. Worker payloads remain immutable; accepted allocation snapshots must preserve annotation callbacks' unrestricted `PodInfo` input contract until it is separately narrowed.
+
 ### External effects and ordering
 
 After normalization, a bounded pool performs immutable API calls and publishes accepted BindRequests directly to the thread-safe informer store. Each worker inserts a deep copy immediately after a successful Create or matching `AlreadyExists` recovery, preserving `origin/main` publication behavior without a separate reservation overlay or routine refresh Gets. Workers do not call session methods or emit Events. Start with one `max(1, ceil(k8sClientQPS))` concurrency budget shared by BindRequest Creates and Pod Deletes; each client still applies its own rate limiter. The finite journal is the pending queue. Per-UID deduplication prevents concurrent effects on one Pod. Independent UIDs can dispatch in parallel. If a real allocation depends on an eviction's completion, it remains pipelined and is not bound at this boundary.
@@ -151,12 +162,12 @@ Record planned, canceled, surviving, dispatched, succeeded, and failed operation
 
 ### Test plan
 
-1. Unit tests for statement transfer, undo filtering, UID folding, plugin-state consistency, and final job-status projection. Verify invalid journal transitions, duplicate evictions, conflicting intents, and same-UID rebinding fail at the statement call without changing state or recording an intent.
+1. Unit tests for statement transfer, undo filtering, UID folding, plugin-state consistency, and final job-status projection. Verify invalid journal transitions, duplicate evictions, conflicting intents, and same-UID rebinding fail at the statement call without changing state or recording an intent. Cover capture before preparation and opening hooks, baseline retention through rollback/replacement/Unevict, nested GPU/NUMA/DRA ownership, and canceled job-start timestamps. Verify existing hook order and accounting remain unchanged.
 2. Session tests for Allocate -> Reclaim/Preempt/Consolidation cancellation, pipeline -> eviction cancellation, active-Pod eviction, same-placement Unevict, stale gang eviction, and background-pod restoration.
 3. Fake-client tests asserting zero Create/Delete/Event/status calls for canceled pairs and exactly one UID-safe effect for surviving intents, including same-name replacement and ambiguous API results.
 4. Envtest with a real API server and Binder: no BindRequest or Pod deletion for a canceled pending Pod; surviving BindRequests are visible before the next session; interrupted or partially failed dispatch converges on the next session.
 5. With the separate issue #2274 fix, run the reclaim regression and E2E workload: reclaim progresses without deleting or emitting scheduler Events for a canceled virtual Pod. Also test a real allocation canceled by later reclaim.
-6. Matched baseline/candidate scale runs: compare session planning time, wait from placement decision to dispatch, time to first BindRequest, commit/drain time, overall fill time, API/Binder load, p50/p95/p99 Create/Delete latency, peak journal memory, and scheduling outcomes. Measure scenario-validation CPU separately when integrating the related fix. Run the same workload and configuration sequentially.
+6. Matched baseline/candidate scale runs: compare session planning time, wait from placement decision to dispatch, time to first BindRequest, commit/drain time, overall fill time, API/Binder load, p50/p95/p99 Create/Delete latency, peak journal memory, and scheduling outcomes. Benchmark opening-only, sparse/all-touched, and repeated-effect replacement across Pod sizes, including GPU/NUMA/DRA; measure allocations and retained memory before claiming copy-related gains. Measure scenario-validation CPU separately when integrating the related fix. Run the same workload and configuration sequentially.
 
 ### Graduation criteria
 
