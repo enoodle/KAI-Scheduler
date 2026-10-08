@@ -26,7 +26,6 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	ksf "k8s.io/kube-scheduler/framework"
-	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/interpodaffinity"
 
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/common_info"
@@ -412,6 +411,8 @@ func (pp *predicatesPlugin) initializeBindReadiness() {
 	if plugin == nil {
 		return
 	}
-	pp.bindReadiness = antiaffinity.New(pp.ssn.ClusterInfo.Nodes, plugin.(*interpodaffinity.InterPodAffinity))
+	internal := pp.ssn.InternalK8sPlugins()
+	pp.bindReadiness = antiaffinity.New(pp.ssn.ClusterInfo.Nodes, internal.FrameworkHandle, internal.Features)
+	pp.ssn.AddNodePreOrderFn(pp.bindReadiness.Prepare)
 	pp.ssn.AddBindReadyFn(pp.bindReadiness.IsReadyForBinding)
 }

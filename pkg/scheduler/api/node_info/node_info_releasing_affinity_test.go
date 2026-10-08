@@ -96,18 +96,23 @@ func TestReleasingPodsWithZeroTrackedResources(t *testing.T) {
 		tasks = append(tasks, task)
 	}
 	require.Len(t, ni.ReleasingPods, 2)
+	require.Equal(t, uint64(2), ni.ReleasingPodsRevision)
 	require.True(t, ni.ReleasingVector.IsZero())
 	stored := ni.ReleasingPods[pod_info.PodKey(tasks[0].Pod)]
 	require.Error(t, ni.AddTask(tasks[0]))
 	require.Same(t, stored, ni.ReleasingPods[pod_info.PodKey(tasks[0].Pod)])
+	require.Equal(t, uint64(2), ni.ReleasingPodsRevision)
 
 	tasks[0].Status = pod_status.Running
 	require.NoError(t, ni.RemoveTask(tasks[0]))
 	require.Len(t, ni.ReleasingPods, 1)
+	require.Equal(t, uint64(3), ni.ReleasingPodsRevision)
 	require.Error(t, ni.RemoveTask(tasks[0]))
 	require.Len(t, ni.ReleasingPods, 1)
+	require.Equal(t, uint64(3), ni.ReleasingPodsRevision)
 	require.NoError(t, ni.RemoveTask(tasks[1]))
 	require.Empty(t, ni.ReleasingPods)
+	require.Equal(t, uint64(4), ni.ReleasingPodsRevision)
 }
 
 func assertReleasingPods(t *testing.T, node *NodeInfo, task *pod_info.PodInfo, status pod_status.PodStatus) {

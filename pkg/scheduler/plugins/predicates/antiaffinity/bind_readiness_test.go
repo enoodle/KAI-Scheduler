@@ -6,6 +6,7 @@ package antiaffinity
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -164,7 +165,7 @@ func newBindReadyTestPlugin(t *testing.T, nodes map[string]*node_info.NodeInfo) 
 			}
 		}
 	}
-	return New(nodes, upstream.(*interpodaffinity.InterPodAffinity)), upstream.(*interpodaffinity.InterPodAffinity)
+	return New(nodes, handle, k8s_utils.GetK8sFeatures()), upstream.(*interpodaffinity.InterPodAffinity)
 }
 
 func TestBindReadySeparatesReleasingAntiAffinity(t *testing.T) {
@@ -207,7 +208,7 @@ func TestBindReadySeparatesReleasingAntiAffinity(t *testing.T) {
 
 func TestBindReadySkipsNodesWithoutReleasingPods(t *testing.T) {
 	node := &node_info.NodeInfo{PodInfos: map[common_info.PodID]*pod_info.PodInfo{"unreadable": nil}}
-	checker := New(map[string]*node_info.NodeInfo{"node0": node}, nil)
+	checker := New(map[string]*node_info.NodeInfo{"node0": node}, nil, k8s_utils.GetK8sFeatures())
 	ready, err := checker.IsReadyForBinding(nil, nil)
 	require.NoError(t, err)
 	require.True(t, ready)
@@ -217,7 +218,7 @@ func TestBindReadyWithoutRequiredAntiAffinity(t *testing.T) {
 	node := &node_info.NodeInfo{ReleasingPods: map[common_info.PodID]*pod_info.PodInfo{
 		"victim": {UID: "victim", Pod: &v1.Pod{}},
 	}}
-	checker := New(map[string]*node_info.NodeInfo{"node0": node}, nil)
+	checker := New(map[string]*node_info.NodeInfo{"node0": node}, nil, k8s_utils.GetK8sFeatures())
 	ready, err := checker.IsReadyForBinding(&pod_info.PodInfo{UID: "incoming", Pod: &v1.Pod{}}, node)
 	require.NoError(t, err)
 	require.True(t, ready)
@@ -237,7 +238,7 @@ func BenchmarkBindReadyFastPaths(b *testing.B) {
 					}
 					nodes[name] = &node_info.NodeInfo{Name: name, PodInfos: pods}
 				}
-				checker := New(nodes, nil)
+				checker := New(nodes, nil, k8s_utils.GetK8sFeatures())
 				b.ReportAllocs()
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
@@ -249,4 +250,56 @@ func BenchmarkBindReadyFastPaths(b *testing.B) {
 			})
 		}
 	}
+}
+
+func TestBindReadyReusesImmutablePreparation(t *testing.T) {
+	const hostname = "kubernetes.io/hostname"
+	incoming := &pod_info.PodInfo{UID: "incoming", Pod: &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "train"},
+		Spec: v1.PodSpec{Affinity: &v1.Affinity{PodAntiAffinity: &v1.PodAntiAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []v1.PodAffinityTerm{{TopologyKey: hostname, LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"tier": "victim"}}}},
+		}}},
+	}}
+	victim := &pod_info.PodInfo{UID: "victim", Status: pod_status.Releasing, Pod: &v1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "train", Labels: map[string]string{"tier": "victim"}}}}
+	nodes := map[string]*node_info.NodeInfo{}
+	for _, name := range []string{"node0", "node1"} {
+		nodes[name] = &node_info.NodeInfo{Node: &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{hostname: name}}}}
+	}
+	nodes["node0"].PodInfos = map[common_info.PodID]*pod_info.PodInfo{"victim": victim}
+	plugin, _ := newBindReadyTestPlugin(t, nodes)
+	checker := plugin.(*bindReadiness)
+	require.NoError(t, checker.Prepare(incoming, nil))
+	original := checker.prepared(incoming)
+	require.NotNil(t, original.state)
+	var workers sync.WaitGroup
+	results := make(chan error, 32)
+	for i := 0; i < cap(results); i++ {
+		workers.Go(func() {
+			for name, node := range nodes {
+				ready, err := checker.IsReadyForBinding(incoming, node)
+				if err != nil {
+					results <- err
+					return
+				}
+				if ready != (name == "node1") {
+					results <- fmt.Errorf("unexpected readiness for %s: %t", name, ready)
+					return
+				}
+			}
+			results <- nil
+		})
+	}
+	workers.Wait()
+	close(results)
+	for err := range results {
+		require.NoError(t, err)
+	}
+	require.Same(t, original, checker.prepared(incoming))
+	// Equal pod counts must not hide replacement of a conflicting releasing pod.
+	nodes["node0"].ReleasingPods["victim"] = &pod_info.PodInfo{UID: "other", Pod: &v1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "train", Labels: map[string]string{"tier": "other"}}}}
+	nodes["node0"].ReleasingPodsRevision++
+	ready, err := checker.IsReadyForBinding(incoming, nodes["node0"])
+	require.NoError(t, err)
+	require.True(t, ready)
+	require.NotSame(t, original, checker.prepared(incoming))
 }

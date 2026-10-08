@@ -83,6 +83,7 @@ type NodeInfo struct {
 
 	PodInfos               map[common_info.PodID]*pod_info.PodInfo
 	ReleasingPods          map[common_info.PodID]*pod_info.PodInfo
+	ReleasingPodsRevision  uint64
 	MaxTaskNum             int
 	MemoryOfEveryGpuOnNode int64
 	GpuMemorySynced        bool
@@ -415,12 +416,16 @@ func (ni *NodeInfo) addTask(task *pod_info.PodInfo, allowTaskToExistOnDifferentG
 	// change will not impact resource in node.
 	ti := task.Clone()
 	ni.PodInfos[key] = ti
+	if _, releasing := ni.ReleasingPods[key]; releasing {
+		ni.ReleasingPodsRevision++
+	}
 	delete(ni.ReleasingPods, key)
 	if ti.Status == pod_status.Releasing {
 		if ni.ReleasingPods == nil {
 			ni.ReleasingPods = make(map[common_info.PodID]*pod_info.PodInfo)
 		}
 		ni.ReleasingPods[key] = ti
+		ni.ReleasingPodsRevision++
 	}
 	if ni.Node == nil {
 		return fmt.Errorf("node is nil during add task, node name: <%v>", ni.Name)
@@ -546,6 +551,9 @@ func (ni *NodeInfo) RemoveTask(ti *pod_info.PodInfo) error {
 			ti.Namespace, ti.Name, ni.Name)
 	}
 	delete(ni.PodInfos, key)
+	if _, releasing := ni.ReleasingPods[key]; releasing {
+		ni.ReleasingPodsRevision++
+	}
 	delete(ni.ReleasingPods, key)
 	if ni.Node == nil {
 		return fmt.Errorf("node is nil during remove task, node name: <%v>", ni.Name)

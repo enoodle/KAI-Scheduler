@@ -10,5 +10,6 @@ import (
 
 // BindReadiness checks conflicts with pods that have not finished releasing.
 type BindReadiness interface {
+	Prepare(*pod_info.PodInfo, []*node_info.NodeInfo) error
 	IsReadyForBinding(*pod_info.PodInfo, *node_info.NodeInfo) (bool, error)
 }
