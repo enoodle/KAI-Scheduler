@@ -331,8 +331,8 @@ var _ = Describe("BindRequest Controller", func() {
 
 				mockBinder := mock_binder.NewMockInterface(gomock.NewController(GinkgoT()))
 				mockBinder.EXPECT().Bind(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
-					Return(errors.New("admission webhook denied the request")).Times(2)
-				mockBinder.EXPECT().Rollback(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).Times(2)
+					Return(errors.New("admission webhook denied the request")).Times(1)
+				mockBinder.EXPECT().Rollback(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).Times(1)
 				reconciler.binder = mockBinder
 
 				req := ctrl.Request{
@@ -356,7 +356,7 @@ var _ = Describe("BindRequest Controller", func() {
 				for event := range fakeEventRecorder.Events {
 					events = append(events, event)
 				}
-				Expect(events).To(HaveLen(2))
+				Expect(events).To(HaveLen(1))
 				for _, event := range events {
 					Expect(event).NotTo(ContainSubstring("bound successfully"))
 					Expect(event).To(ContainSubstring("BindingError"))
