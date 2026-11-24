@@ -48,6 +48,8 @@ type DomainInfo struct {
 	// Level in the hierarchy (e.g., "datacenter", "zone", "rack", "node")
 	Level DomainLevel
 
+	parent *DomainInfo
+
 	// Child domains (slice maintains ordering for bin-packing and traversal algorithms)
 	Children []*DomainInfo
 
@@ -91,6 +93,7 @@ func (t *DomainInfo) AddChild(child *DomainInfo) {
 		}
 	}
 	t.Children = append(t.Children, child)
+	child.parent = t
 }
 
 func calcDomainId(leafLevelIndex int, levels []kaiv1alpha1.TopologyLevel, nodeLabels map[string]string) DomainID {

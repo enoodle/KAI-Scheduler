@@ -35,6 +35,12 @@ func (t *topologyPlugin) nodeOrderFn(task *pod_info.PodInfo, node *node_info.Nod
 }
 
 func calculateNodeScores(domain *DomainInfo, preferredLevel DomainLevel) map[string]float64 {
+	for ancestor := domain.parent; ancestor != nil; ancestor = ancestor.parent {
+		if ancestor.Level == preferredLevel {
+			preferredLevel = domain.Level
+			break
+		}
+	}
 	orderedPreferredLevelDomains := getLevelDomains(domain, preferredLevel)
 
 	nodeScores := make(map[string]float64)

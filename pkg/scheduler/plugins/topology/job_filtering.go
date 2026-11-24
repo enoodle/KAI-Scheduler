@@ -60,6 +60,12 @@ func (t *topologyPlugin) subSetNodesFn(
 		}
 	}
 
+	// Ancestors contain the same candidate nodes as the search subtree.
+	for ancestor := domain.parent; ancestor != nil; ancestor = ancestor.parent {
+		copy(ancestor.IdleOrReleasingVector, domain.IdleOrReleasingVector)
+		ancestor.AllocatablePods = domain.AllocatablePods
+	}
+
 	tasksResources, tasksCount := getTasksAllocationMetadata(tasks)
 
 	var dbc *extendedresourcecache.ExtendedResourceCache
@@ -101,6 +107,7 @@ func (t *topologyPlugin) subSetNodesFn(
 	jobAllocatableDomains = sortDomainInfos(topologyTree, jobAllocatableDomains)
 
 	var domainNodeSets []node_info.NodeSet
+	fullSubsetSeen := false
 	for _, jobAllocatableDomain := range jobAllocatableDomains {
 		var domainNodeSet node_info.NodeSet
 		for _, node := range jobAllocatableDomain.Nodes {
@@ -108,6 +115,13 @@ func (t *topologyPlugin) subSetNodesFn(
 				continue
 			}
 			domainNodeSet = append(domainNodeSet, node)
+		}
+		// Ancestors of the search subtree can all offer the same full candidate set.
+		if len(domainNodeSet) == len(validNodes) {
+			if fullSubsetSeen {
+				continue
+			}
+			fullSubsetSeen = true
 		}
 		domainNodeSets = append(domainNodeSets, domainNodeSet)
 	}
