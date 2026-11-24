@@ -24,6 +24,56 @@ func TestAllocateTopologyIntegrationTest(t *testing.T) {
 	integration_tests_utils.RunTests(t, getTopologyAllocateTestsMetadata())
 }
 
+func TestAllocateWithPreferredTopologyAboveCandidateDomain(t *testing.T) {
+	const (
+		topologyName = "datacenter-topology"
+		zoneLabel    = "topology.kubernetes.io/zone"
+		rackLabel    = "topology.kubernetes.io/rack"
+		jobName      = "training-job"
+		queueName    = "queue0"
+	)
+	integration_tests_utils.RunTests(t, []integration_tests_utils.TestTopologyMetadata{{
+		TestTopologyBasic: test_utils.TestTopologyBasic{
+			Name: "Bind both GPU pods when all candidates share a zone and the job prefers root",
+			Topologies: []*kaiv1alpha1.Topology{{
+				ObjectMeta: v1.ObjectMeta{Name: topologyName},
+				Spec: kaiv1alpha1.TopologySpec{Levels: []kaiv1alpha1.TopologyLevel{
+					{NodeLabel: zoneLabel},
+					{NodeLabel: rackLabel},
+				}},
+			}},
+			Jobs: []*jobs_fake.TestJobBasic{{
+				Name:                jobName,
+				QueueName:           queueName,
+				Priority:            constants.PriorityTrainNumber,
+				RequiredGPUsPerTask: 1,
+				RootSubGroupSet: subgroup_info.NewSubGroupSet(subgroup_info.RootSubGroupSetName,
+					&topology_info.TopologyConstraintInfo{
+						Topology:       topologyName,
+						RequiredLevel:  "root",
+						PreferredLevel: "root",
+					}),
+				Tasks: []*tasks_fake.TestTaskBasic{
+					{State: pod_status.Pending},
+					{State: pod_status.Pending},
+				},
+			}},
+			Nodes: map[string]nodes_fake.TestNodeBasic{
+				"node0": {GPUs: 1, Labels: map[string]string{zoneLabel: "zone1", rackLabel: "rack1"}},
+				"node1": {GPUs: 1, Labels: map[string]string{zoneLabel: "zone1", rackLabel: "rack2"}},
+			},
+			Queues: []test_utils.TestQueueBasic{{Name: queueName, DeservedGPUs: 2}},
+			JobExpectedResults: map[string]test_utils.TestExpectedResultBasic{
+				jobName: {GPUsRequired: 2, Status: pod_status.Running},
+			},
+			Mocks: &test_utils.TestMock{
+				CacheRequirements: &test_utils.CacheMocking{NumberOfCacheBinds: 2},
+			},
+		},
+		RoundsUntilMatch: 1,
+	}})
+}
+
 func getTopologyAllocateTestsMetadata() []integration_tests_utils.TestTopologyMetadata {
 	return []integration_tests_utils.TestTopologyMetadata{
 		{
